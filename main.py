@@ -1,4 +1,5 @@
-from fastapi import FastAPI, UploadFile, File
+import json
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 
 from src.services.audio_io import temp_audio_file
@@ -28,24 +29,49 @@ async def shutdown_event():
 
 
 @app.post("/analyze")
-async def analyze(file: UploadFile = File(...)):
+async def analyze(
+    file: UploadFile = File(...),
+    taskId: str = Form(...),
+    analysisRequest: str = Form(...)
+):
+
     if not file.filename:
         return {"error": "파일 이름이 없습니다"}
     
     # 1. 파일 읽기 (Bytes)
     audio_bytes = await file.read()
+    analysis_request = json.loads(analysisRequest)
         
     # 2. 제너레이터 래퍼
     def stream_with_cleanup():
         with temp_audio_file(audio_bytes, suffix=".wav") as audio_path:
-            
-            # 파일 경로(audio_path)를 파이프라인에 넘김
             for chunk in analyze_speech_stream(
                 audio_path=audio_path,
                 loaded_models=loaded_models,
+                analysis_request=analysis_request,
                 mode="all"
             ):
-                yield chunk
+                try:
+                    payload = json.loads(chunk)
+                    t = payload.get("type")
+                    if t == "feedback":
+                        t = "llm"
+
+                    yield json.dumps({
+                        "type": t,
+                        "taskId": taskId,
+                        "status": "SUCCESS",
+                        "error": None,
+                        "analysisResult": payload.get("data")
+                    }, ensure_ascii=False) + "\n"
+                except Exception as e:
+                    yield json.dumps({
+                        "type": "error",
+                        "taskId": taskId,
+                        "status": "ERROR",
+                        "error": str(e),
+                        "analysisResult": None
+                    }, ensure_ascii=False) + "\n"
 
     # 3. StreamingResponse 반환
     return StreamingResponse(

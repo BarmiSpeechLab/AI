@@ -4,6 +4,7 @@ import sys
 import json
 import warnings
 import logging
+from typing import Any, Dict, List, Literal, Generator
 
 # --- 시스템 설정 ---
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -17,35 +18,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.models.stt_whisper import extract_word_timings, WhisperModels
 from src.models.pitch_crepe import extract_pitch_crepe
 from src.models.align_merge import merge_words_with_pitch_curve
-from src.models.g2p import text_to_phonemes
-from src.models.pronunciation import phonemes_to_hangul_ipa
+from src.models.pronunciation_eval import process_pronunciation_eval
 from src.models.llm_feedback import generate_llm_feedback 
 
 Mode = Literal["pron", "inton", "all"]
-
-
-def _process_pronunciation(words: List[str]) -> List[Dict[str, Any]]:
-    """
-    단어 리스트를 받아 발음 기호(IPA) 및 한글 발음으로 변환
-    """
-    results = []
-
-    for idx, w in enumerate(words):
-        # 1) 텍스트를 음소(ARPAbet)로 변환 -> upl
-        upl = text_to_phonemes(w)
-
-        # 2) 음소를 기반으로 한글 표기 및 IPA 추출
-        ukor, _ipa_str, uipa = phonemes_to_hangul_ipa(upl)
-
-        word_data = {
-            "word": w.upper().replace(".", ""),
-            "phonemes": [{"upl": p, "uipa": i} for p, i in zip(upl, uipa)],
-            "ukor": ukor
-        }
-        results.append(word_data)
-
-    return results
-
 
 def _process_intonation(
     audio_path: str, 
@@ -63,7 +39,7 @@ def _process_intonation(
 def analyze_speech_stream(
     audio_path: str,
     loaded_models: WhisperModels,   # 이미 로딩된 모델을 받음
-    reference_data: Dict[str, str], # 분석 비교를 위한 정답 데이터
+    analysis_request: Dict[str, Any], # 분석 비교를 위한 정답 데이터
     mode: Mode = "all",
 ) -> Generator[str, None, None]:
     """
@@ -73,6 +49,12 @@ def analyze_speech_stream(
     3. Intonation (CREPE)
     4. LLM Feedback (gpt-4.1-nano)
     """
+
+    word_details = analysis_request.get("wordDetails", [])
+    reference_data = {
+        wd["text"].upper(): " ".join(p["cipa"] for p in wd.get("phonemes", []))
+        for wd in word_details
+    }
     
     # 1. WhisperX: 공통 전처리 단계
     model = loaded_models.model
@@ -106,7 +88,7 @@ def analyze_speech_stream(
 
         if do_pron:
             # 발음 분석 작업 제출
-            f_pron = executor.submit(_process_pronunciation, words)
+            f_pron = executor.submit(process_pronunciation_eval, words, reference_data)
             future_map[f_pron] = "pron"
         
         if do_into:
