@@ -54,6 +54,32 @@ async def analyze(
                 try:
                     payload = json.loads(chunk)
                     t = payload.get("type")
+
+                    # 1) 에러 처리
+                    if t == "error":
+                        task = payload.get("task")
+                        # task 에러는 type 유지 + FAIL
+                        if task in ("pron", "inton", "feedback"):
+                            mapped_type = "llm" if task == "feedback" else task
+                            yield json.dumps({
+                                "type": mapped_type,
+                                "taskId": taskId,
+                                "status": "FAIL",
+                                "error": payload.get("message"),
+                                "analysisResult": None
+                            }, ensure_ascii=False) + "\n"
+                        else:
+                            # 초기 단계 에러(WhisperX 포함)
+                            yield json.dumps({
+                                "type": "error",
+                                "taskId": taskId,
+                                "status": "FAIL",
+                                "error": payload.get("message"),
+                                "analysisResult": None
+                            }, ensure_ascii=False) + "\n"
+                        continue
+                                    
+                    # 2) 정상 결과
                     if t == "feedback":
                         t = "llm"
 
@@ -64,11 +90,13 @@ async def analyze(
                         "error": None,
                         "analysisResult": payload.get("data")
                     }, ensure_ascii=False) + "\n"
+
                 except Exception as e:
+                    # 파싱/래핑 에러도 FAIL
                     yield json.dumps({
                         "type": "error",
                         "taskId": taskId,
-                        "status": "ERROR",
+                        "status": "FAIL",
                         "error": str(e),
                         "analysisResult": None
                     }, ensure_ascii=False) + "\n"
