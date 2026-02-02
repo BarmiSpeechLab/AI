@@ -1,42 +1,50 @@
 from __future__ import annotations
+import os
+import sys
+import json
+import warnings
+import logging
+
+# --- 시스템 설정 ---
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+warnings.filterwarnings("ignore", category=UserWarning)
+logging.getLogger("whisperx").setLevel(logging.ERROR)
 
 from typing import Any, Dict, List, Literal, Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import json
-from src.models.stt_whisper import (
-    get_whisperx_models,
-    extract_word_timings,
-)
-from src.models.stt_whisper import WhisperModels
+
+# --- 모듈 임포트 ---
+from src.models.stt_whisper import extract_word_timings, WhisperModels
 from src.models.pitch_crepe import extract_pitch_crepe
 from src.models.align_merge import merge_words_with_pitch_curve
 from src.models.g2p import text_to_phonemes
 from src.models.pronunciation import phonemes_to_hangul_ipa
+from src.models.llm_feedback import generate_llm_feedback 
 
 Mode = Literal["pron", "inton", "all"]
 
 
-def _process_pronunciation(words: List[str]) -> Dict[str, Any]:
-    """발음 분석 실행"""
-    pron: Dict[str, Any] = {}
+def _process_pronunciation(words: List[str]) -> List[Dict[str, Any]]:
+    """
+    단어 리스트를 받아 발음 기호(IPA) 및 한글 발음으로 변환
+    """
+    results = []
 
     for idx, w in enumerate(words):
-        # 1) 단어별 phonemes (ARPAbet) -> upl
+        # 1) 텍스트를 음소(ARPAbet)로 변환 -> upl
         upl = text_to_phonemes(w)
 
-        # 2) 단어별 한글/IPA
+        # 2) 음소를 기반으로 한글 표기 및 IPA 추출
         ukor, _ipa_str, uipa = phonemes_to_hangul_ipa(upl)
 
-        # 동일 단어 반복 대비: key를 유니크하게
-        key = w  # 중복 가능성 있으면: f"{w}#{idx}"로 변경
-
-        pron[key] = {
-            "upl": upl,     # ARPAbet list
-            "uipa": uipa,   # IPA list
-            "ukor": ukor,   # 한글 발음 문자열
+        word_data = {
+            "word": w.upper().replace(".", ""),
+            "phonemes": [{"upl": p, "uipa": i} for p, i in zip(upl, uipa)],
+            "ukor": ukor
         }
+        results.append(word_data)
 
-    return pron
+    return results
 
 
 def _process_intonation(
@@ -44,30 +52,29 @@ def _process_intonation(
     word_segments: List[Dict[str, Any]], 
     device: str
 ) -> List[Dict[str, Any]]:
-    """인토네이션 분석 실행"""
+    """
+    인토네이션 분석 실행
+    -> 음성 파일에서 피치(Pitch)를 추출하고 단어별 타이밍에 매칭
+    """
     pitch_result = extract_pitch_crepe(audio_path, device=device)
     return merge_words_with_pitch_curve(word_segments, pitch_result)
 
 
 def analyze_speech_stream(
     audio_path: str,
-    # whisper_model_name: str = "small.en",
-    # whisper_vad_method: str = "silero",
     loaded_models: WhisperModels,   # 이미 로딩된 모델을 받음
+    reference_data: Dict[str, str], # 분석 비교를 위한 정답 데이터
     mode: Mode = "all",
 ) -> Generator[str, None, None]:
     """
-    [기능] 음성 파이프라인 메인 함수
+    [Main Pipeline] 음성 분석 파이프라인 메인 함수
     1. WhisperX (공통)
     2. Pronunciation (G2P)
     3. Intonation (CREPE)
+    4. LLM Feedback (gpt-4.1-nano)
     """
     
-    # 1. WhisperX 공통 단계: 모델 로드 -> 실행 -> 메모리 정리
-    # model, model_a, metadata, device = get_whisperx_models(
-    #     model_name=whisper_model_name,
-    #     vad_method=whisper_vad_method,
-    # )
+    # 1. WhisperX: 공통 전처리 단계
     model = loaded_models.model
     model_a = loaded_models.align_model
     metadata = loaded_models.metadata
@@ -87,12 +94,13 @@ def analyze_speech_stream(
         return
 
     words = [w["word"] for w in word_segments]
+    pron_result_for_feedback = None  # 결과를 담을 변수 
 
-    # 실행할 작업 플래그 설정
+    # 작업 실행 플래그
     do_pron = mode in ("pron", "all")
     do_into = mode in ("inton", "all")
 
-    # 2. 분석 실행
+    # 2. 비동기 병렬 분석 실행
     with ThreadPoolExecutor(max_workers=2) as executor:
         future_map = {}
 
@@ -106,13 +114,16 @@ def analyze_speech_stream(
             f_into = executor.submit(_process_intonation, audio_path, word_segments, device)
             future_map[f_into] = "inton"
 
-        # 먼저 끝나는 작업부터 yield (as_completed)
+        # 작업이 완료되는 순서대로 클라이언트에 전송
         for future in as_completed(future_map):
             task_type = future_map[future]
             try:
                 result_data = future.result()
+
+                # 발음 결과는 피드백을 위해 따로 저장
+                if task_type == "pron":
+                    pron_result_for_feedback = result_data
                 
-                # 결과 전송 (type으로 구분)
                 yield json.dumps({
                     "type": task_type,
                     "data": result_data
@@ -125,39 +136,65 @@ def analyze_speech_stream(
                     "message": str(e)
                 }, ensure_ascii=False) + "\n"
 
+    # 3. LLM 맞춤형 피드백 생성 (분석 완료 후 마지막 단계)
+    if pron_result_for_feedback and mode in ("pron", "all"):
+        try:
+            feedback_text = generate_llm_feedback(pron_result_for_feedback, reference_data)
+            
+            yield json.dumps({
+                "type": "feedback",
+                "data": feedback_text
+            }, ensure_ascii=False) + "\n"
+
+        except Exception as e:
+            yield json.dumps({
+                "type": "error", 
+                "task": "feedback", 
+                "message": str(e)
+            }, ensure_ascii=False) + "\n"    
+
 # 로컬 실행 테스트용
 if __name__ == "__main__":
-    import json
-    import os
-    # 모델 로더 함수 import 필요
     from src.models.stt_whisper import get_whisperx_models
 
-    # 테스트 파일 경로 확인
-    test_file = "./experiments/wav_data/i_like_to_dance.wav"
+    # 테스트 설정치
+    test_file = "./experiments/wav_data/i_like_to_dance_test.wav"
+    test_refs = {"I": "aɪ", "LIKE": "l aɪ k", "TO": "t u", "DANCE": "d æ n s"} # 테스트 정답
     
     if os.path.exists(test_file):
-        print("⏳ [Test] 모델 로딩 중... (처음엔 시간이 좀 걸립니다)")
+        print("\n--- [Test] 모델 로딩 중... ---")
         
-        # 1. 테스트를 위해 여기서 모델을 직접 로드합니다. (Main.py의 lifespan 역할)
+        # 테스트를 위해 여기서 모델을 직접 로드합니다. (Main.py의 lifespan 역할)
         # 실제 서버에서는 이미 로드된 걸 쓰지만, 로컬 테스트에선 직접 준비해야 합니다.
-        loaded_models_tuple = get_whisperx_models(
-            model_name="small.en", 
-            vad_method="silero"
-        )
-        print("✅ [Test] 모델 로딩 완료!")
+        models = get_whisperx_models(model_name="small.en", vad_method="silero")
+        print("\n--- [Test] 모델 로딩 완료! ---")
 
-        print("🎤 [Test] 분석 시작...")
-        
-        # 2. 로드된 모델을 인자로 넘겨줍니다.
+        print("\n--- [Test] 분석 시작 ---")
+        # 분석 스트림 시작
         generator = analyze_speech_stream(
             audio_path=test_file, 
-            mode="all", 
-            loaded_models=loaded_models_tuple # <--- 핵심: 모델 전달
+            loaded_models=models,
+            reference_data=test_refs, # 정답 데이터
+            mode="all"
         )
         
-        # 3. 결과 스트리밍 출력
+        # 스트리밍 결과 출력
+        #for chunk in generator:
+        #    print(chunk.strip())
         for chunk in generator:
-            print(chunk.strip())
-            
+            res = json.loads(chunk)
+            t = res["type"]
+
+            if t == "pron":
+                #print(f"\n[발음] {len(res['data'])}개 단어 분석 완료")
+                print("\n--- [1. 발음 분석 결과] ---")
+                print(json.dumps(res["data"], indent=4, ensure_ascii=False))
+            elif t == "inton":
+                print(f"[강세] 인토네이션 곡선 추출 완료")
+            elif t == "feedback":
+                print(f"\n--- [3. AI 맞춤형 피드백] ---")
+                print(res["data"])
+            elif t == "error":
+                print(f"에러: {res['message']}")         
     else:
-        print(f"❌ 파일을 찾을 수 없습니다: {test_file}")
+        print(f"파일을 찾을 수 없습니다: {test_file}")
