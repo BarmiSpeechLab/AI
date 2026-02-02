@@ -29,8 +29,13 @@ def generate_llm_feedback(pron_data: List[Dict[str, Any]], reference_data: Dict[
         word = item['word']
         target_word = item.get('target_word', word)
         user_ipa = " ".join([p['uipa'] for p in item['phonemes'] if p['uipa'] not in (None, ".", "")])
-        target_ipa = reference_data.get(target_word, "N/A")
-        
+        ref_entry = reference_data.get(target_word)
+        if isinstance(ref_entry, dict):
+            ref_ph = ref_entry.get("phonemes", [])
+            target_ipa = " ".join([p.get("cipa","") for p in ref_ph if p.get("cipa")])
+        else:
+            target_ipa = ref_entry or "N/A"
+
         comparison_summary.append({
             "word": word,
             "target_word": target_word,

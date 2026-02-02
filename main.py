@@ -5,21 +5,23 @@ from fastapi.responses import StreamingResponse
 from src.services.audio_io import temp_audio_file
 from src.services.speech_pipeline import analyze_speech_stream
 from src.models.stt_whisper import get_whisperx_models
+from src.models.phoneme import load_phoneme_models
 
 app = FastAPI(title="Speech Analysis API")
 
 # 전역 변수
 loaded_models = None
+phoneme_models = None
 
 @app.on_event("startup")
 async def startup_event():
-    global loaded_models
+    global loaded_models, phoneme_models
     print("⏳ 모델 로딩 중...")
-    loaded_models = get_whisperx_models(
-        model_name="small.en",
-        vad_method="silero"
-    )
+    loaded_models = get_whisperx_models(model_name="small.en", vad_method="silero")
+    #phoneme_models = load_phoneme_models("src/fine_tuned_model")
+    phoneme_models = load_phoneme_models("wishkim/wav2vec2-l2arctic-phoneme")
     print("✅ 모델 로딩 완료!")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -48,6 +50,7 @@ async def analyze(
             for chunk in analyze_speech_stream(
                 audio_path=audio_path,
                 loaded_models=loaded_models,
+                phoneme_models=phoneme_models,
                 analysis_request=analysis_request,
                 mode="all"
             ):
