@@ -23,12 +23,22 @@ def generate_llm_feedback(pron_data: List[Dict[str, Any]], reference_data: Dict[
     # 1. 비교용 데이터 정제
     comparison_summary = []
     for item in pron_data:
+        if item.get("error_rate", 0) == 0:
+            continue  # 틀리지 않으면 LLM에 보내지 않음
+
         word = item['word']
-        user_ipa = " ".join([p['uipa'] for p in item['phonemes']])
-        target_ipa = reference_data.get(word, "N/A")
-        
+        target_word = item.get('target_word', word)
+        user_ipa = " ".join([p['uipa'] for p in item['phonemes'] if p['uipa'] not in (None, ".", "")])
+        ref_entry = reference_data.get(target_word)
+        if isinstance(ref_entry, dict):
+            ref_ph = ref_entry.get("phonemes", [])
+            target_ipa = " ".join([p.get("cipa","") for p in ref_ph if p.get("cipa")])
+        else:
+            target_ipa = ref_entry or "N/A"
+
         comparison_summary.append({
             "word": word,
+            "target_word": target_word,
             "user_ipa": user_ipa,
             "target_ipa": target_ipa
         })
