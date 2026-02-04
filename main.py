@@ -1,11 +1,14 @@
 import json
-from fastapi import FastAPI, UploadFile, File, Form
+from pydantic import BaseModel
+from fastapi import FastAPI, UploadFile, File, Form, Body
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import iterate_in_threadpool
 
 from src.services.audio_io import temp_audio_file
 from src.services.speech_pipeline import analyze_speech_stream
 from src.models.stt_whisper import get_whisperx_models
 from src.models.phoneme import load_phoneme_models
+from src.services.conversation_pipeline import conversation_stream
 
 app = FastAPI(title="Speech Analysis API")
 
@@ -109,6 +112,25 @@ async def analyze(
         stream_with_cleanup(), 
         media_type="application/x-ndjson"
     )
+
+
+
+class ConversationRequest(BaseModel):
+    taskId: str
+    filePath: str
+    status: str | None = "SUCCESS"
+    error: str | None = None
+    analysisResult: dict | None = None
+
+@app.post("/conversation")
+async def conversation(req: ConversationRequest):
+    payload = req.model_dump()
+    return StreamingResponse(
+        iterate_in_threadpool(conversation_stream(payload)),
+        media_type="application/x-ndjson"
+    )
+
+
 
 if __name__ == "__main__":
     import uvicorn
