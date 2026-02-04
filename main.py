@@ -1,6 +1,8 @@
 import json
+from pydantic import BaseModel
 from fastapi import FastAPI, UploadFile, File, Form, Body
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import iterate_in_threadpool
 
 from src.services.audio_io import temp_audio_file
 from src.services.speech_pipeline import analyze_speech_stream
@@ -112,12 +114,22 @@ async def analyze(
     )
 
 
+
+class ConversationRequest(BaseModel):
+    taskId: str
+    filePath: str
+    status: str | None = "SUCCESS"
+    error: str | None = None
+    analysisResult: dict | None = None
+
 @app.post("/conversation")
-async def conversation(payload: dict = Body(...)):
+async def conversation(req: ConversationRequest):
+    payload = req.model_dump()
     return StreamingResponse(
-        conversation_stream(payload),
+        iterate_in_threadpool(conversation_stream(payload)),
         media_type="application/x-ndjson"
     )
+
 
 
 if __name__ == "__main__":
