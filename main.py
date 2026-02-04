@@ -1,6 +1,6 @@
 import json
 from pydantic import BaseModel
-from fastapi import FastAPI, UploadFile, File, Form, Body
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import iterate_in_threadpool
 
@@ -123,13 +123,32 @@ class ConversationRequest(BaseModel):
     analysisResult: dict | None = None
 
 @app.post("/conversation")
-async def conversation(req: ConversationRequest):
-    payload = req.model_dump()
+async def conversation(
+    file: UploadFile = File(...),
+    taskId: str = Form(...),
+    analysisRequest: str = Form(None),
+):
+    if not file.filename:
+        return {"error": "파일 이름이 없습니다"}
+
+    audio_bytes = await file.read()
+    analysis_req = json.loads(analysisRequest) if analysisRequest else {}
+
+    def stream_with_cleanup():
+        with temp_audio_file(audio_bytes, suffix=".wav") as audio_path:
+            payload = {
+                "taskId": taskId,
+                "filePath": audio_path,      # ✅ temp wav 경로
+                "status": "SUCCESS",
+                "analysisRequest": analysis_req
+            }
+            for chunk in conversation_stream(payload):
+                yield chunk
+
     return StreamingResponse(
-        iterate_in_threadpool(conversation_stream(payload)),
+        stream_with_cleanup(),
         media_type="application/x-ndjson"
     )
-
 
 
 if __name__ == "__main__":
