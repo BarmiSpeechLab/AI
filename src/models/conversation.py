@@ -269,7 +269,7 @@ def handle_conversation_request(payload: dict) -> dict:
     status = payload.get("status")
     err = payload.get("error")
 
-    ar = payload.get("analysisResult") or {}
+    ar = payload.get("analysisRequest") or {}
     prev_turn = ar.get("prevTurn")
     theme = ar.get("theme")
 

@@ -15,7 +15,7 @@ payload = {
     "filePath": args.file,
     "status": args.status,
     "error": None,
-    "analysisResult": {
+    "analysisRequest": {
         "prevTurn": args.prev,
         "theme": args.theme
     }
