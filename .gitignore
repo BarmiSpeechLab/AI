@@ -35,9 +35,11 @@ logs/
 *.pt
 *.pth
 *.h5
-models/
 checkpoints/
 
 # Misc
 .cache/
 coverage/
+
+# Model
+./src/fine_tuned_model.zip

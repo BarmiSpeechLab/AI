@@ -1,0 +1,237 @@
+from __future__ import annotations
+import os
+import sys
+import json
+import warnings
+import logging
+from typing import Any, Dict, List, Literal, Generator
+from src.models.g2p import text_to_phonemes
+from src.models.phoneme import extract_arpabet_full, PhonemeModels
+from src.models.pronunciation_eval import process_pronunciation_eval, split_arpabet_by_reference
+
+
+# --- 시스템 설정 ---
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+warnings.filterwarnings("ignore", category=UserWarning)
+logging.getLogger("whisperx").setLevel(logging.ERROR)
+
+from typing import Any, Dict, List, Literal, Generator
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# --- 모듈 임포트 ---
+from src.models.stt_whisper import extract_word_timings, WhisperModels
+from src.models.pitch_crepe import extract_pitch_crepe
+from src.models.align_merge import merge_words_with_pitch_curve
+from src.models.pronunciation_eval import process_pronunciation_eval
+from src.models.llm_feedback import generate_llm_feedback 
+
+Mode = Literal["pron", "inton", "all"]
+
+def _process_intonation(
+    audio_path: str, 
+    word_segments: List[Dict[str, Any]], 
+    device: str
+) -> List[Dict[str, Any]]:
+    """
+    인토네이션 분석 실행
+    -> 음성 파일에서 피치(Pitch)를 추출하고 단어별 타이밍에 매칭
+    """
+    pitch_result = extract_pitch_crepe(audio_path, device=device)
+    return merge_words_with_pitch_curve(word_segments, pitch_result)
+
+def _process_pronunciation_finetuned(
+    audio_path: str,
+    reference_data: Dict[str, Any],
+    phoneme_models: PhonemeModels,
+) -> List[Dict[str, Any]]:
+    # reference_data의 순서 = wordDetails 순서 (Python 3.7+ dict preserve)
+    words = list(reference_data.keys())
+    user_tokens = extract_arpabet_full(audio_path, phoneme_models)
+    user_arpabet_by_word = split_arpabet_by_reference(user_tokens, reference_data)
+    return process_pronunciation_eval(words, reference_data, user_arpabet_by_word)
+
+
+def _process_pronunciation_whisper(
+    words: List[str],
+    reference_data: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    user_arpabet_by_word = []
+    for w in words:
+        clean_word = w.strip().strip(".,!?")
+        user_arpabet_by_word.append(text_to_phonemes(clean_word))
+    return process_pronunciation_eval(words, reference_data, user_arpabet_by_word)
+
+
+def analyze_speech_stream(
+    audio_path: str,
+    loaded_models: WhisperModels,  
+    phoneme_models: PhonemeModels, 
+    analysis_request: Dict[str, Any], 
+    mode: Mode = "all",
+) -> Generator[str, None, None]:
+    """
+    [Main Pipeline] 음성 분석 파이프라인 메인 함수
+    1. WhisperX (공통)
+    2. Pronunciation (G2P)
+    3. Intonation (CREPE)
+    4. LLM Feedback (gpt-4.1-nano)
+    """
+
+    word_details = analysis_request.get("wordDetails", [])
+    reference_data = {
+        wd["text"].upper(): {
+            "phonemes": [
+                {"cpl": p.get("cpl"), "cipa": p.get("cipa")}
+                for p in wd.get("phonemes", [])
+            ],
+            "ckor": wd.get("kor", {}).get("ckor", "")
+        }
+        for wd in word_details
+    }
+
+    # 분기 모델 
+    analysis_type = (analysis_request.get("type") or "").lower()
+    use_phoneme_model = analysis_type in ("ipa", "word")
+
+    # 작업 실행 플래그
+    do_pron = mode in ("pron", "all")
+    do_into = mode in ("inton", "all")
+
+    # inton은 항상 whisperx 필요
+    need_word_segments = do_into or (do_pron and not use_phoneme_model)
+    
+    # 1. WhisperX: 공통 전처리 단계
+    model = loaded_models.model
+    model_a = loaded_models.align_model
+    metadata = loaded_models.metadata
+    device = loaded_models.device
+    
+    word_segments = []
+    if need_word_segments:
+        try:
+            word_segments = extract_word_timings(
+                audio_path=audio_path,
+                model=model,
+                model_a=model_a,
+                metadata=metadata,
+                device=device,
+                batch_size=16,
+            )
+        except Exception as e:
+            yield json.dumps({"type": "error", "message": str(e)}) + "\n"
+            return
+
+    words = [w["word"] for w in word_segments]
+    pron_result_for_feedback = None  # 결과를 담을 변수 
+
+    # 2. 비동기 병렬 분석 실행
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_map = {}
+
+        if do_pron:
+            # finetuned phoneme 모델
+            if use_phoneme_model: 
+                f_pron = executor.submit(
+                    _process_pronunciation_finetuned,
+                    audio_path, reference_data, phoneme_models
+                )
+            else:
+                # whisper + g2p
+                f_pron = executor.submit(
+                    _process_pronunciation_whisper,
+                    words, reference_data
+                )
+            future_map[f_pron] = "pron"
+        
+        if do_into:
+            # 인토네이션 분석 작업 제출
+            f_into = executor.submit(
+                _process_intonation, 
+                audio_path, word_segments, device
+            )
+            future_map[f_into] = "inton"
+
+        # 작업이 완료되는 순서대로 클라이언트에 전송
+        for future in as_completed(future_map):
+            task_type = future_map[future]
+            try:
+                result_data = future.result()
+
+                # 발음 결과는 피드백을 위해 따로 저장
+                if task_type == "pron":
+                    pron_result_for_feedback = result_data
+                
+                yield json.dumps({
+                    "type": task_type,
+                    "data": result_data
+                }, ensure_ascii=False) + "\n"
+                
+            except Exception as e:
+                yield json.dumps({
+                    "type": "error",
+                    "task": task_type,
+                    "message": str(e)
+                }, ensure_ascii=False) + "\n"
+
+    # 3. LLM 맞춤형 피드백 생성 (분석 완료 후 마지막 단계)
+    if pron_result_for_feedback and mode in ("pron", "all"):
+        try:
+            feedback_text = generate_llm_feedback(pron_result_for_feedback, reference_data)
+            
+            yield json.dumps({
+                "type": "feedback",
+                "data": feedback_text
+            }, ensure_ascii=False) + "\n"
+
+        except Exception as e:
+            yield json.dumps({
+                "type": "error", 
+                "task": "feedback", 
+                "message": str(e)
+            }, ensure_ascii=False) + "\n"    
+
+# 로컬 실행 테스트용
+if __name__ == "__main__":
+    from src.models.stt_whisper import get_whisperx_models
+
+    # 테스트 설정치
+    test_file = "./experiments/wav_data/i_like_to_dance_test.wav"
+    test_refs = {"I": "aɪ", "LIKE": "l aɪ k", "TO": "t u", "DANCE": "d æ n s"} # 테스트 정답
+    
+    if os.path.exists(test_file):
+        print("\n--- [Test] 모델 로딩 중... ---")
+        
+        # 테스트를 위해 여기서 모델을 직접 로드합니다. (Main.py의 lifespan 역할)
+        # 실제 서버에서는 이미 로드된 걸 쓰지만, 로컬 테스트에선 직접 준비해야 합니다.
+        models = get_whisperx_models(model_name="small.en", vad_method="silero")
+        print("\n--- [Test] 모델 로딩 완료! ---")
+
+        print("\n--- [Test] 분석 시작 ---")
+        # 분석 스트림 시작
+        generator = analyze_speech_stream(
+            audio_path=test_file, 
+            loaded_models=models,
+            reference_data=test_refs, # 정답 데이터
+            mode="all"
+        )
+        
+        # 스트리밍 결과 출력
+        #for chunk in generator:
+        #    print(chunk.strip())
+        for chunk in generator:
+            res = json.loads(chunk)
+            t = res["type"]
+
+            if t == "pron":
+                #print(f"\n[발음] {len(res['data'])}개 단어 분석 완료")
+                print("\n--- [1. 발음 분석 결과] ---")
+                print(json.dumps(res["data"], indent=4, ensure_ascii=False))
+            elif t == "inton":
+                print(f"[강세] 인토네이션 곡선 추출 완료")
+            elif t == "feedback":
+                print(f"\n--- [3. AI 맞춤형 피드백] ---")
+                print(res["data"])
+            elif t == "error":
+                print(f"에러: {res['message']}")         
+    else:
+        print(f"파일을 찾을 수 없습니다: {test_file}")
