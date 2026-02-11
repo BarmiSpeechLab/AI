@@ -1,5 +1,5 @@
 # Wav2Vec2 기반 L2-Arctic 음소 단위 발음 오류 검출 Fine-Tuning
-해당 파인튜닝 과정은 [Fine_Tuned.ipynb](./fine-tuning/Fine_Tuned.ipynb)에 학습 코드를 확인하시 수 있습니다.
+해당 파인튜닝 과정은 [Fine_Tuned.ipynb](./fine-tuning/Fine_Tuned.ipynb)에 학습 코드를 확인하실 수 있습니다.
 
 ## 왜 파인튜닝이 필요하였나요?
 본 서비스는 청각장애인을 위한 영어 발음 교정 서비스를 목표로 기획되었습니다.   
