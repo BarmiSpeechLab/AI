@@ -52,7 +52,7 @@ AI/
 ### 📄 Technical Documents
 모델 학습 과정 및 상세 연구 내용은 아래의 **기술 개발 문서(Notion)** 에서 확인하실 수 있습니다.
 
-🏗️ System Architecture & Implementation
+🏗**️ System Architecture & Implementation**
 - [🔗 AI 분석 파이프라인 통합 설계]()
 
   : `/analyze` API에서 WhisperX, Wav2Vec2, CREPE가 어떤 순서로 데이터를 주고받는지, 그리고 왜 StreamingResponse를 선택했는지에 대한 설계 문서
@@ -63,7 +63,7 @@ AI/
 
   : 프론트엔드와의 실시간 통신을 위해 설계한 커스텀 데이터 구조(type, status, analysisResult)에 대한 규격서
 
-🧪 Research & Model Reviews
+**🧪 Research & Model Reviews**
 - [🔗 Wav2Vec2 음소 인식 파인튜닝 과정](https://faceted-animantarx-5f1.notion.site/fine-tuning?source=copy_link)
 
   : 파인튜닝 지표(PER) 및 데이터 전처리 과정
