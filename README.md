@@ -38,7 +38,7 @@ AI/
 
     - **지능형 조음 피드백 (Articulatory Feedback)**
       - **Core**: LLM (Large Language Model)
-      - **Detail**: 단순 점수를 넘어, "혀의 위치를 더 높게", "입술을 더 둥글게"와 같이 구체적인 조음 기관의 움직임을 맞춤형으로 가이드합니다.
+      - **Detail**: Few-Shot Prompting을 통해 "혀의 위치를 더 높게", "입술을 더 둥글게"와 같이 구체적인 조음 기관의 움직임을 맞춤형으로 가이드합니다.
 
     - **WhisperX 통합 분석**
       - **Detail**: 정밀한 타임스탬프를 활용하여 문장 내 특정 단어와 음소의 위치를 일치시킵니다.
@@ -52,16 +52,11 @@ AI/
 ### 📄 Technical Documents
 모델 학습 과정 및 상세 연구 내용은 아래의 **기술 개발 문서(Notion)** 에서 확인하실 수 있습니다.
 
-🏗**️ System Architecture & Implementation**
-- [🔗 AI 분석 파이프라인 통합 설계]()
+🏗**️ System Architecture**
+- [🔗 AI 분석 파이프라인 통합 설계](https://www.notion.so/AI-306fc74069a6801cbb34cb1a021fa3c2?source=copy_link)
 
   : `/analyze` API에서 WhisperX, Wav2Vec2, CREPE가 어떤 순서로 데이터를 주고받는지, 그리고 왜 StreamingResponse를 선택했는지에 대한 설계 문서
-- [🔗 음소-피치 정렬 로직 (Alignment strategy)]()
 
-  : WhisperX의 타임스탬프와 CREPE의 피치 데이터를 어떻게 매칭시켜서 특정 음소의 억양 곡선을 추출했는지에 대한 기술적 해결 방식
-- [🔗 실시간 데이터 통신 규격 (NDJSON)]()
-
-  : 프론트엔드와의 실시간 통신을 위해 설계한 커스텀 데이터 구조(type, status, analysisResult)에 대한 규격서
 
 **🧪 Research & Model Reviews**
 - [🔗 Wav2Vec2 음소 인식 파인튜닝 과정](https://faceted-animantarx-5f1.notion.site/fine-tuning?source=copy_link)
